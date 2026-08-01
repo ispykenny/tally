@@ -131,10 +131,28 @@ private enum StatusFilter: String, CaseIterable {
     case draft = "Draft"
 }
 
+/// Section frames in the list's coordinate space, for hit-testing drags.
+private struct SectionFramesKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] { [:] }
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
 private struct PRListView: View {
     @EnvironmentObject private var state: AppState
     @State private var statusFilter: StatusFilter = .all
     @State private var authorFilter: String?
+
+    // Reordering is a plain drag *gesture*, not system drag-and-drop —
+    // NSItemProvider drag sessions don't reliably start inside the
+    // non-activating MenuBarExtra panel.
+    @State private var sectionFrames: [String: CGRect] = [:]
+    @State private var draggingRepo: String?
+    @State private var dragTranslation: CGFloat = 0
+    /// The dragged section's resting frame, captured at drag start — its
+    /// live frame moves with the drag and would double-count the offset.
+    @State private var dragOriginFrame: CGRect = .zero
 
     private var isFiltering: Bool {
         statusFilter != .all || authorFilter != nil
@@ -297,35 +315,124 @@ private struct PRListView: View {
         return min(max(content + 24, 120), 460)
     }
 
+    /// Repos with a visible section, in display order.
+    private var visibleRepos: [String] {
+        state.repos.filter { repo in
+            let visible = filtered(state.pullRequests[repo] ?? [])
+            return !(isFiltering && visible.isEmpty && state.repoErrors[repo] == nil)
+        }
+    }
+
+    /// The repo the dragged section would land before (nil = end of list).
+    private var insertionBefore: String? {
+        guard let draggingRepo else { return nil }
+        let pointerY = dragOriginFrame.midY + dragTranslation
+        return visibleRepos.first { repo in
+            repo != draggingRepo && pointerY < (sectionFrames[repo]?.midY ?? -.infinity)
+        }
+    }
+
+    /// Collision avoidance: sections between the drag origin and the
+    /// current insertion point step aside by the dragged section's height,
+    /// opening a live gap where the drop will land.
+    private func sectionOffset(for repo: String) -> CGFloat {
+        guard let draggingRepo else { return 0 }
+        if repo == draggingRepo { return dragTranslation }
+        let order = visibleRepos
+        guard let from = order.firstIndex(of: draggingRepo),
+              let index = order.firstIndex(of: repo)
+        else { return 0 }
+        let to: Int
+        if let target = insertionBefore, let targetIndex = order.firstIndex(of: target) {
+            to = targetIndex
+        } else {
+            to = order.count
+        }
+        let gap = dragOriginFrame.height + 10
+        if to > from {
+            return (index > from && index < to) ? -gap : 0
+        } else {
+            return (index >= to && index < from) ? gap : 0
+        }
+    }
+
+    /// True when releasing now would leave the order unchanged.
+    private var dropIsNoop: Bool {
+        guard let draggingRepo else { return true }
+        let order = visibleRepos
+        guard let from = order.firstIndex(of: draggingRepo) else { return true }
+        if let target = insertionBefore {
+            return order.firstIndex(of: target) == from + 1
+        }
+        return from == order.count - 1
+    }
+
+    private func finishDrag() {
+        defer {
+            draggingRepo = nil
+            dragTranslation = 0
+        }
+        guard let moved = draggingRepo, abs(dragTranslation) > 4, !dropIsNoop else { return }
+        let target = insertionBefore
+        withAnimation(.easeOut(duration: 0.22)) {
+            state.moveRepo(moved, before: target)
+        }
+    }
+
     private var prList: some View {
         ScrollView {
             TimelineView(.periodic(from: .now, by: 30)) { context in
                 GlassEffectContainer(spacing: 10) {
                     VStack(alignment: .leading, spacing: 10) {
-                        ForEach(state.repos, id: \.self) { repo in
+                        ForEach(visibleRepos, id: \.self) { repo in
                             let visible = filtered(state.pullRequests[repo] ?? [])
-                            if !(isFiltering && visible.isEmpty && state.repoErrors[repo] == nil) {
-                                RepoSectionView(
-                                    repo: repo,
-                                    prs: visible,
-                                    // Filtered views count what's visible;
-                                    // otherwise the repo's true open total.
-                                    badgeCount: isFiltering
-                                        ? visible.count
-                                        : (state.openPRCounts[repo] ?? visible.count),
-                                    error: state.repoErrors[repo],
-                                    now: context.date
-                                )
-                                // Composite each section's layout changes so
-                                // its children move as one unit while the
-                                // list resizes.
-                                .geometryGroup()
-                            }
+                            let isDragged = draggingRepo == repo
+                            RepoSectionView(
+                                repo: repo,
+                                prs: visible,
+                                // Filtered views count what's visible;
+                                // otherwise the repo's true open total.
+                                badgeCount: isFiltering
+                                    ? visible.count
+                                    : (state.openPRCounts[repo] ?? visible.count),
+                                error: state.repoErrors[repo],
+                                now: context.date,
+                                onDragChanged: { translation in
+                                    if draggingRepo != repo {
+                                        draggingRepo = repo
+                                        dragOriginFrame = sectionFrames[repo] ?? .zero
+                                    }
+                                    dragTranslation = translation
+                                },
+                                onDragEnded: finishDrag
+                            )
+                            // Composite each section's layout changes so
+                            // its children move as one unit while the
+                            // list resizes.
+                            .geometryGroup()
+                            // Drag offsets stay OUTSIDE the geometry group
+                            // so live drag motion bypasses layout compositing.
+                            // The dragged section tracks the pointer raw;
+                            // bystanders animate as they step aside.
+                            .offset(y: sectionOffset(for: repo))
+                            .animation(
+                                isDragged ? nil : .easeOut(duration: 0.18),
+                                value: sectionOffset(for: repo)
+                            )
+                            .shadow(color: .black.opacity(isDragged ? 0.25 : 0), radius: 10, y: 3)
+                            .zIndex(isDragged ? 1 : 0)
                         }
                     }
                     .padding(12)
+                    .coordinateSpace(name: "repoList")
                 }
             }
+        }
+        .onPreferenceChange(SectionFramesKey.self) { frames in
+            // Frozen while dragging: the moving section re-reports its
+            // frame every pixel, which would churn state and drop math.
+            guard draggingRepo == nil else { return }
+            sectionFrames = frames
         }
     }
 }
@@ -337,8 +444,8 @@ private struct RepoSectionView: View {
     let badgeCount: Int
     let error: String?
     let now: Date
-
-    @State private var dropTargeted = false
+    let onDragChanged: (CGFloat) -> Void
+    let onDragEnded: () -> Void
 
     private var collapsed: Bool { state.isCollapsed(repo) }
     private var muted: Bool { state.isMuted(repo) }
@@ -363,6 +470,9 @@ private struct RepoSectionView: View {
                 } else {
                     ForEach(Array(prs.enumerated()), id: \.element.id) { index, pr in
                         PRRowView(pr: pr, now: now)
+                            // Skips re-rendering unchanged rows — a drag
+                            // re-evaluates the list on every mouse event.
+                            .equatable()
                             .transition(.rowCascade(index: index))
                     }
                     // The fetch caps at the newest 50 — say so instead of
@@ -385,21 +495,14 @@ private struct RepoSectionView: View {
                 }
             }
         }
-        .dropDestination(for: String.self) { items, _ in
-            guard let moved = items.first, moved != repo else { return false }
-            withAnimation(.easeInOut(duration: 0.2)) {
-                state.moveRepo(moved, onto: repo)
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: SectionFramesKey.self,
+                    value: [repo: proxy.frame(in: .named("repoList"))]
+                )
             }
-            return true
-        } isTargeted: { dropTargeted = $0 }
-        .overlay(alignment: .top) {
-            if dropTargeted {
-                Capsule()
-                    .fill(.tint)
-                    .frame(height: 3)
-                    .offset(y: -6)
-            }
-        }
+        )
     }
 
     private var header: some View {
@@ -442,12 +545,21 @@ private struct RepoSectionView: View {
             // these icons conflict with a hover-driven fade and make them
             // vanish under the cursor. This grip is the drag handle — the
             // rest of the header is buttons, which swallow drag gestures.
+            // A plain gesture (not .draggable): system drag sessions don't
+            // start reliably in the non-activating MenuBarExtra panel.
             Image(systemName: "line.3.horizontal")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .frame(width: 22, height: 22)
                 .contentShape(Rectangle())
-                .draggable(repo)
+                .gesture(
+                    // Global space: the section moves with the drag, so a
+                    // local-space translation feeds back on itself and
+                    // oscillates.
+                    DragGesture(minimumDistance: 3, coordinateSpace: .global)
+                        .onChanged { onDragChanged($0.translation.height) }
+                        .onEnded { _ in onDragEnded() }
+                )
                 .help("Drag to reorder")
 
             Button {
@@ -520,10 +632,14 @@ private extension AnyTransition {
     }
 }
 
-private struct PRRowView: View {
+private struct PRRowView: View, Equatable {
     let pr: PullRequest
     let now: Date
     @State private var hovering = false
+
+    static func == (lhs: PRRowView, rhs: PRRowView) -> Bool {
+        lhs.pr == rhs.pr && lhs.now == rhs.now
+    }
 
     var body: some View {
         Button {
