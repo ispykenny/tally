@@ -292,7 +292,7 @@ private struct PRListView: View {
             } else {
                 rows = 26
             }
-            return total + 26 + rows + 10
+            return total + 38 + rows + 10
         }
         return min(max(content + 24, 120), 460)
     }
@@ -311,6 +311,10 @@ private struct PRListView: View {
                                     error: state.repoErrors[repo],
                                     now: context.date
                                 )
+                                // Composite each section's layout changes so
+                                // its children move as one unit while the
+                                // list resizes.
+                                .geometryGroup()
                             }
                         }
                     }
@@ -328,74 +332,168 @@ private struct RepoSectionView: View {
     let error: String?
     let now: Date
 
+    @State private var dropTargeted = false
+
     private var collapsed: Bool { state.isCollapsed(repo) }
+    private var muted: Bool { state.isMuted(repo) }
+    private var index: Int? { state.repos.firstIndex(of: repo) }
+    private var owner: String { repo.split(separator: "/").first.map(String.init) ?? "" }
+    private var name: String { repo.split(separator: "/").dropFirst().joined(separator: "/") }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        state.toggleCollapsed(repo)
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "chevron.right")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(.secondary)
-                            .rotationEffect(.degrees(collapsed ? 0 : 90))
-                        Image(systemName: "book.closed")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(repo)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(collapsed ? "Expand \(repo)" : "Collapse \(repo)")
-
-                Button {
-                    state.toggleMuted(repo)
-                } label: {
-                    Image(systemName: state.isMuted(repo) ? "eye.slash.fill" : "eye")
-                        .font(.caption)
-                        .foregroundStyle(state.isMuted(repo) ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
-                }
-                .buttonStyle(.plain)
-                .help(
-                    state.isMuted(repo)
-                        ? "Hidden from the menu bar badge — click to count it again"
-                        : "Hide this repo's PRs from the menu bar badge"
-                )
-
-                Text("\(prs.count)")
-                    .font(.caption2.weight(.bold))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .glassEffect(.regular, in: Capsule())
-            }
-            .padding(.horizontal, 4)
-
+            header
             if !collapsed {
                 if let error {
                     Text(error)
                         .font(.caption)
                         .foregroundStyle(.red)
-                        .padding(.horizontal, 4)
+                        .padding(.horizontal, 8)
                 } else if prs.isEmpty {
                     Text("No open PRs")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 4)
+                        .padding(.horizontal, 8)
                 } else {
-                    ForEach(prs) { pr in
+                    ForEach(Array(prs.enumerated()), id: \.element.id) { index, pr in
                         PRRowView(pr: pr, now: now)
+                            .transition(.rowCascade(index: index))
                     }
                 }
             }
         }
+        .dropDestination(for: String.self) { items, _ in
+            guard let moved = items.first, moved != repo else { return false }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                state.moveRepo(moved, onto: repo)
+            }
+            return true
+        } isTargeted: { dropTargeted = $0 }
+        .overlay(alignment: .top) {
+            if dropTargeted {
+                Capsule()
+                    .fill(.tint)
+                    .frame(height: 3)
+                    .offset(y: -6)
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(.easeOut(duration: 0.22)) {
+                    state.toggleCollapsed(repo)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(collapsed ? 0 : 90))
+
+                    // Org/user logo — GitHub serves it at github.com/<owner>.png
+                    RemoteImage(url: URL(string: "https://github.com/\(owner).png?size=64")) {
+                        Image(systemName: "building.2.crop.circle.fill")
+                            .resizable()
+                            .foregroundStyle(.tertiary)
+                    }
+                    .frame(width: 18, height: 18)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+
+                    (Text(owner).foregroundStyle(.secondary).fontWeight(.regular)
+                        + Text(" / ").foregroundStyle(.tertiary).fontWeight(.regular)
+                        + Text(name))
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.head)
+
+                    Spacer(minLength: 4)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(collapsed ? "Expand \(repo)" : "Collapse \(repo)")
+
+            // Deliberately not hover-revealed: tooltip tracking areas on
+            // these icons conflict with a hover-driven fade and make them
+            // vanish under the cursor. This grip is the drag handle — the
+            // rest of the header is buttons, which swallow drag gestures.
+            Image(systemName: "line.3.horizontal")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .frame(width: 22, height: 22)
+                .contentShape(Rectangle())
+                .draggable(repo)
+                .help("Drag to reorder")
+
+            Button {
+                state.toggleMuted(repo)
+            } label: {
+                Image(systemName: muted ? "eye.slash.fill" : "eye")
+                    .font(.caption)
+                    .foregroundStyle(muted ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
+            }
+            .buttonStyle(.plain)
+            .help(
+                muted
+                    ? "Hidden from the menu bar badge — click to count it again"
+                    : "Hide this repo's PRs from the menu bar badge"
+            )
+
+            Text("\(prs.count)")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(prs.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(.quaternary, in: Capsule())
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        // Static glass: the interactive variant claims mouse events and
+        // blocks drag gestures from starting on the header.
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
+        .contextMenu {
+            Button(collapsed ? "Expand" : "Collapse") {
+                withAnimation(.easeOut(duration: 0.22)) {
+                    state.toggleCollapsed(repo)
+                }
+            }
+            Button(muted ? "Show in Badge Count" : "Hide from Badge Count") {
+                state.toggleMuted(repo)
+            }
+            Divider()
+            Button("Move Up") { state.moveRepo(repo, up: true) }
+                .disabled(index == 0)
+            Button("Move Down") { state.moveRepo(repo, up: false) }
+                .disabled(index == state.repos.count - 1)
+            Divider()
+            Button("Open on GitHub") {
+                if let url = URL(string: "https://github.com/\(repo)") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        }
+    }
+}
+
+private extension AnyTransition {
+    /// Expanding a section cascades its rows in top-to-bottom; collapsing
+    /// is a single quick fade (staggered removal reads as lag). The delay
+    /// caps after the first several rows so long lists settle fast. Also
+    /// fires when a poll inserts a newly opened PR mid-list.
+    static func rowCascade(index: Int) -> AnyTransition {
+        // Tight stagger tuned to finish inside the container's height
+        // animation — longer delays leave visible empty slots ("popcorn").
+        .asymmetric(
+            insertion: .opacity
+                .combined(with: .offset(y: -6))
+                .animation(
+                    .spring(response: 0.28, dampingFraction: 0.85)
+                        .delay(min(Double(index), 5) * 0.03)
+                ),
+            removal: .opacity.animation(.easeOut(duration: 0.1))
+        )
     }
 }
 
@@ -490,9 +588,7 @@ struct AvatarView: View {
     var size: CGFloat = 26
 
     var body: some View {
-        AsyncImage(url: url) { image in
-            image.resizable().scaledToFill()
-        } placeholder: {
+        RemoteImage(url: url) {
             Image(systemName: "person.crop.circle.fill")
                 .resizable()
                 .foregroundStyle(.tertiary)

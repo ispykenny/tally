@@ -171,6 +171,21 @@ final class AppState: ObservableObject {
         persistRepos()
     }
 
+    /// Drag-and-drop reorder: drops `moved` at `target`'s position —
+    /// before it when dragging up, after it when dragging down.
+    func moveRepo(_ moved: String, onto target: String) {
+        guard moved != target,
+              let from = repos.firstIndex(of: moved),
+              let to = repos.firstIndex(of: target)
+        else { return }
+        repos.remove(at: from)
+        // Same index works both directions: dragging down, the removal
+        // shifted the target to to-1, so `to` lands after it; dragging
+        // up, the target is still at `to`, so it lands before it.
+        repos.insert(moved, at: to)
+        persistRepos()
+    }
+
     func isCollapsed(_ fullName: String) -> Bool {
         collapsedRepos.contains(fullName)
     }
