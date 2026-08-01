@@ -66,7 +66,10 @@ jobs:
             echo "$NOTARY_KEY_B64" | base64 -d > "$RUNNER_TEMP/notary.p8"
             export NOTARY_KEY_FILE="$RUNNER_TEMP/notary.p8"
           fi
-          ./dist.sh
+          # zsh, not ./: doesn't depend on the exec bit, which silently
+          # resets whenever the script is committed from a checkout where
+          # the on-disk file isn't executable.
+          zsh dist.sh
 
       - name: Generate Sparkle appcast
         env:
