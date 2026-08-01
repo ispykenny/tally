@@ -96,6 +96,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          # unversioned copy so the website can link the stable
+          # …/releases/latest/download/Tally.dmg URL
+          cp dist/Tally-"$VERSION".dmg dist/Tally.dmg
           ASSETS=(dist/*.dmg dist/*.zip)
           [[ -f dist/appcast.xml ]] && ASSETS+=(dist/appcast.xml)
           gh release create "$GITHUB_REF_NAME" "${ASSETS[@]}" \
