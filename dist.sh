@@ -77,7 +77,9 @@ if [[ -n "${DEVELOPER_ID:-}" && ${#NOTARY_ARGS[@]} -gt 0 ]]; then
     echo "▸ Stapling ticket to the app and rebuilding packages…"
     xcrun stapler staple "$APP"
     package
-    xcrun stapler staple "$DMG" || true
+    echo "▸ Notarizing the DMG…"
+    xcrun notarytool submit "$DMG" "${NOTARY_ARGS[@]}" --wait
+    xcrun stapler staple "$DMG"
     echo "✓ Notarized and stapled."
 elif [[ -n "${DEVELOPER_ID:-}" ]]; then
     echo "ℹ Signed but NOT notarized. To notarize:"
