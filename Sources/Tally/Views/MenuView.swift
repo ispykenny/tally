@@ -173,7 +173,7 @@ private struct PRListView: View {
                     title: "No repositories yet",
                     message: "Open the gear menu and add repos to watch their open pull requests."
                 )
-            } else if state.totalPRCount == 0 && state.repoErrors.isEmpty {
+            } else if !state.hasAnyOpenPRs && state.repoErrors.isEmpty {
                 EmptyStateView(
                     icon: "checkmark.circle",
                     title: "All clear",
@@ -308,6 +308,11 @@ private struct PRListView: View {
                                 RepoSectionView(
                                     repo: repo,
                                     prs: visible,
+                                    // Filtered views count what's visible;
+                                    // otherwise the repo's true open total.
+                                    badgeCount: isFiltering
+                                        ? visible.count
+                                        : (state.openPRCounts[repo] ?? visible.count),
                                     error: state.repoErrors[repo],
                                     now: context.date
                                 )
@@ -329,6 +334,7 @@ private struct RepoSectionView: View {
     @EnvironmentObject private var state: AppState
     let repo: String
     let prs: [PullRequest]
+    let badgeCount: Int
     let error: String?
     let now: Date
 
@@ -358,6 +364,23 @@ private struct RepoSectionView: View {
                     ForEach(Array(prs.enumerated()), id: \.element.id) { index, pr in
                         PRRowView(pr: pr, now: now)
                             .transition(.rowCascade(index: index))
+                    }
+                    // The fetch caps at the newest 50 — say so instead of
+                    // letting the list silently impersonate the whole repo.
+                    if badgeCount > prs.count {
+                        Button {
+                            if let url = URL(string: "https://github.com/\(repo)/pulls") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        } label: {
+                            Text("Showing newest \(prs.count) of \(badgeCount) — view all on GitHub ↗")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 4)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -441,9 +464,9 @@ private struct RepoSectionView: View {
                     : "Hide this repo's PRs from the menu bar badge"
             )
 
-            Text("\(prs.count)")
+            Text("\(badgeCount)")
                 .font(.caption2.weight(.bold))
-                .foregroundStyle(prs.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                .foregroundStyle(badgeCount == 0 ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 2)
                 .background(.quaternary, in: Capsule())

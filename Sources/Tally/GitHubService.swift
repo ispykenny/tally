@@ -140,7 +140,10 @@ enum GitHubService {
         struct ErrorItem: Codable { let message: String }
         struct DataObject: Codable { let repository: Repo? }
         struct Repo: Codable { let pullRequests: Connection }
-        struct Connection: Codable { let nodes: [Node] }
+        struct Connection: Codable {
+            let totalCount: Int
+            let nodes: [Node]
+        }
         struct Count: Codable { let totalCount: Int }
         struct Actor: Codable {
             let login: String
@@ -172,6 +175,7 @@ enum GitHubService {
     query($owner: String!, $name: String!) {
       repository(owner: $owner, name: $name) {
         pullRequests(states: OPEN, first: 50, orderBy: {field: CREATED_AT, direction: DESC}) {
+          totalCount
           nodes {
             databaseId
             number
@@ -192,7 +196,14 @@ enum GitHubService {
     }
     """
 
-    static func openPullRequests(repoFullName: String, token: String) async throws -> [PullRequest] {
+    /// The newest 50 open PRs plus the repo's true open-PR total —
+    /// big repos exceed the page, and badges should show the real count.
+    struct OpenPRs {
+        let prs: [PullRequest]
+        let totalOpen: Int
+    }
+
+    static func openPullRequests(repoFullName: String, token: String) async throws -> OpenPRs {
         let parts = repoFullName.split(separator: "/")
         guard parts.count == 2 else { throw GitHubError.notFound(repoFullName) }
 
@@ -230,7 +241,7 @@ enum GitHubService {
             throw GitHubError.notFound(repoFullName)
         }
 
-        return repo.pullRequests.nodes.map { node in
+        let prs = repo.pullRequests.nodes.map { node in
             PullRequest(
                 id: node.databaseId ?? node.number,
                 number: node.number,
@@ -247,5 +258,6 @@ enum GitHubService {
                 viewerDidAuthor: node.viewerDidAuthor
             )
         }
+        return OpenPRs(prs: prs, totalOpen: repo.pullRequests.totalCount)
     }
 }

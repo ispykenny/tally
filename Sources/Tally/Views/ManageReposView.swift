@@ -323,8 +323,8 @@ private struct RepoRowView: View {
                     .font(.callout.weight(.medium))
                 Text(
                     state.isMuted(repo)
-                        ? "\(state.pullRequests[repo]?.count ?? 0) open PRs · hidden from badge"
-                        : "\(state.pullRequests[repo]?.count ?? 0) open PRs"
+                        ? "\(state.openPRCounts[repo] ?? state.pullRequests[repo]?.count ?? 0) open PRs · hidden from badge"
+                        : "\(state.openPRCounts[repo] ?? state.pullRequests[repo]?.count ?? 0) open PRs"
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)

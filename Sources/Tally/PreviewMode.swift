@@ -54,9 +54,9 @@ enum PreviewMode {
                 exit(1)
             }
             do {
-                let prs = try await GitHubService.openPullRequests(repoFullName: repo, token: token)
-                print("PRTEST OK repo=\(repo) count=\(prs.count)")
-                for pr in prs.prefix(10) {
+                let result = try await GitHubService.openPullRequests(repoFullName: repo, token: token)
+                print("PRTEST OK repo=\(repo) count=\(result.prs.count) totalOpen=\(result.totalOpen)")
+                for pr in result.prs.prefix(10) {
                     print("  #\(pr.number) approvals=\(pr.approvals) comments=\(pr.commentsCount) draft=\(pr.isDraft) by=\(pr.user?.login ?? "?") viewer=\(pr.viewerReviewState ?? "-") requested=\(pr.viewerReviewRequested) mine=\(pr.viewerDidAuthor) \(pr.title.prefix(40))")
                 }
             } catch {

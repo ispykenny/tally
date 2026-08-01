@@ -8,6 +8,9 @@ final class AppState: ObservableObject {
     @Published var user: GitHubUser?
     @Published var repos: [String] = []
     @Published var pullRequests: [String: [PullRequest]] = [:]
+    /// True open-PR totals per repo — the list itself is capped at the
+    /// newest 50, so badges read from here.
+    @Published var openPRCounts: [String: Int] = [:]
     @Published var repoErrors: [String: String] = [:]
     @Published var isRefreshing = false
     @Published var lastError: String?
@@ -25,7 +28,6 @@ final class AppState: ObservableObject {
     /// "animates" by re-rendering alternating frames.
     @Published var showSparkle = false
     @Published var sparklePhase = false
-    private var lastTotalCount: Int?
     private var sparkleTimer: Timer?
     private var sparkleTicksRemaining = 0
     private var sparkleActivity: NSObjectProtocol?
@@ -40,10 +42,17 @@ final class AppState: ObservableObject {
 
     var isSignedIn: Bool { user != nil }
 
+    /// Whether any subscribed repo has open PRs at all — muting is a
+    /// badge concern and must not make the list claim "All clear".
+    var hasAnyOpenPRs: Bool {
+        repos.contains { !(pullRequests[$0] ?? []).isEmpty }
+    }
+
     /// Badge count for the menu bar — muted repos excluded.
     var totalPRCount: Int {
         repos.reduce(0) { total, repo in
-            mutedRepos.contains(repo) ? total : total + (pullRequests[repo]?.count ?? 0)
+            guard !mutedRepos.contains(repo) else { return total }
+            return total + (openPRCounts[repo] ?? pullRequests[repo]?.count ?? 0)
         }
     }
 
@@ -87,6 +96,7 @@ final class AppState: ObservableObject {
         Keychain.delete()
         user = nil
         pullRequests = [:]
+        openPRCounts = [:]
         repoErrors = [:]
         lastError = nil
         myRepos = []
@@ -136,6 +146,7 @@ final class AppState: ObservableObject {
     func removeRepo(_ fullName: String) {
         repos.removeAll { $0 == fullName }
         pullRequests[fullName] = nil
+        openPRCounts[fullName] = nil
         repoErrors[fullName] = nil
         collapsedRepos.remove(fullName)
         mutedRepos.remove(fullName)
@@ -248,12 +259,14 @@ final class AppState: ObservableObject {
         }
 
         var hadError = false
+        var newPRCount = 0
         for repo in repos {
             do {
-                let prs = try await GitHubService.openPullRequests(repoFullName: repo, token: token)
-                pullRequests[repo] = prs
+                let result = try await GitHubService.openPullRequests(repoFullName: repo, token: token)
+                pullRequests[repo] = result.prs
+                openPRCounts[repo] = result.totalOpen
                 repoErrors[repo] = nil
-                notifyAboutNewPRs(prs, in: repo)
+                newPRCount += notifyAboutNewPRs(result.prs, in: repo)
             } catch {
                 repoErrors[repo] = error.localizedDescription
                 hadError = true
@@ -261,13 +274,12 @@ final class AppState: ObservableObject {
         }
         if !hadError { lastError = nil }
 
-        // Sparkle the menu bar badge when the total changes (not on the
-        // very first load).
-        let total = totalPRCount
-        if let last = lastTotalCount, last != total {
+        // Sparkle the menu bar badge only for genuinely new PRs — busy
+        // repos change their raw totals on nearly every poll, and a
+        // count-diff trigger would run the animation as a metronome.
+        if newPRCount > 0 {
             triggerSparkle()
         }
-        lastTotalCount = total
     }
 
     func triggerSparkle() {
@@ -311,22 +323,27 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Notify for PR ids we haven't seen before. The first fetch for a repo
-    /// seeds the seen-set silently so subscribing doesn't fire a burst of
-    /// notifications for already-open PRs.
-    private func notifyAboutNewPRs(_ prs: [PullRequest], in repo: String) {
+    /// Notify for PR ids we haven't seen before, returning how many fired.
+    /// The first fetch for a repo seeds the seen-set silently so
+    /// subscribing doesn't fire a burst of notifications for already-open
+    /// PRs.
+    @discardableResult
+    private func notifyAboutNewPRs(_ prs: [PullRequest], in repo: String) -> Int {
         let key = Self.seenKeyPrefix + repo
         let defaults = UserDefaults.standard
         let previouslySeen = Set((defaults.array(forKey: key) as? [Int]) ?? [])
         let currentIDs = Set(prs.map(\.id))
 
+        var posted = 0
         if !previouslySeen.isEmpty {
             for pr in prs where !previouslySeen.contains(pr.id) {
                 NotificationManager.shared.postNewPR(pr)
+                posted += 1
             }
         }
 
         // Keep the union so a briefly-closed PR doesn't re-notify on reopen.
         defaults.set(Array(previouslySeen.union(currentIDs)), forKey: key)
+        return posted
     }
 }
