@@ -1,0 +1,100 @@
+name: Release
+
+# Pushing a v* tag (./release.sh does this) builds, signs, notarizes,
+# and publishes a GitHub Release with the dmg, zip, and Sparkle appcast.
+#
+# Secrets (all optional — missing ones degrade gracefully):
+#   MACOS_CERT_P12       base64 of a Developer ID Application .p12
+#   MACOS_CERT_PASSWORD  password for the .p12
+#   NOTARY_KEY           base64 of an App Store Connect API key (.p8)
+#   NOTARY_KEY_ID        the API key's ID
+#   NOTARY_ISSUER        the API key's issuer UUID
+#   SPARKLE_PRIVATE_KEY  Sparkle EdDSA private key (generate_keys -x)
+#
+# Without cert secrets the build is ad-hoc signed (Gatekeeper blocks it
+# on download — testing only). Without SPARKLE_PRIVATE_KEY no appcast is
+# published, so that release won't be offered over the air.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode 26
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [[ -n "$XCODE" ]]; then sudo xcode-select -s "$XCODE"; fi
+          xcodebuild -version
+
+      - name: Import Developer ID certificate
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          if [[ -z "$MACOS_CERT_P12" ]]; then
+            echo "::warning::No MACOS_CERT_P12 secret — release will be ad-hoc signed and blocked by Gatekeeper."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p ci "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p ci "$KEYCHAIN"
+          echo "$MACOS_CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | awk -F'"' '/Developer ID Application/ {print $2; exit}')
+          echo "DEVELOPER_ID=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build, sign, package (and notarize if keys present)
+        env:
+          NOTARY_KEY_B64: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          if [[ -n "$NOTARY_KEY_B64" ]]; then
+            echo "$NOTARY_KEY_B64" | base64 -d > "$RUNNER_TEMP/notary.p8"
+            export NOTARY_KEY_FILE="$RUNNER_TEMP/notary.p8"
+          fi
+          ./dist.sh
+
+      - name: Generate Sparkle appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
+            echo "::warning::No SPARKLE_PRIVATE_KEY secret — skipping appcast; this release won't update over the air."
+            exit 0
+          fi
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$RUNNER_TEMP/sparkle_ed_key"
+          UPDATES="$RUNNER_TEMP/updates"
+          mkdir -p "$UPDATES"
+          cp dist/*.zip "$UPDATES/"
+          GENERATE_APPCAST=$(find .build/artifacts -name generate_appcast -type f | head -1)
+          "$GENERATE_APPCAST" \
+            --ed-key-file "$RUNNER_TEMP/sparkle_ed_key" \
+            --download-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/" \
+            --link "https://github.com/$GITHUB_REPOSITORY" \
+            -o dist/appcast.xml "$UPDATES"
+          rm "$RUNNER_TEMP/sparkle_ed_key"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSETS=(dist/*.dmg dist/*.zip)
+          [[ -f dist/appcast.xml ]] && ASSETS+=(dist/appcast.xml)
+          gh release create "$GITHUB_REF_NAME" "${ASSETS[@]}" \
+            --title "Tally $VERSION" \
+            --generate-notes
